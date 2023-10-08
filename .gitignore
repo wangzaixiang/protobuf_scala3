@@ -1,4 +1,5 @@
 target/
 .idea/
+.bsp/
 ### Mac OS ###
 .DS_Store
