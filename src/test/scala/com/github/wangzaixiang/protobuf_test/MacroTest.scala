@@ -1,7 +1,7 @@
 package com.github.wangzaixiang.protobuf_test
 
 import org.scalatest.funsuite.AnyFunSuite
-import com.github.wangzaixiang.protobuf.*
+import com.github.wangzaixiang.protobuf4s.*
 
 object MacroTest:
 
@@ -126,5 +126,9 @@ class MacroTest extends AnyFunSuite {
     val bean1 = Bean1(true, null, Bean2(10, "Hello") :: Nil)
     MacroTest.check(bean1)
   }
+
+  // TODO default value support
+  // TODO enum type support
+  // TODO map type support
 
 }

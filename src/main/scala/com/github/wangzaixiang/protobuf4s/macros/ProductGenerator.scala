@@ -1,7 +1,7 @@
-package com.github.wangzaixiang.protobuf.macros
+package com.github.wangzaixiang.protobuf4s.macros
 
-import scala.quoted.{Expr, *}
-import com.github.wangzaixiang.protobuf.*
+import scala.quoted.*
+import com.github.wangzaixiang.protobuf4s.*
 import com.google.protobuf.{CodedInputStream, CodedOutputStream}
 
 import java.io.ByteArrayOutputStream

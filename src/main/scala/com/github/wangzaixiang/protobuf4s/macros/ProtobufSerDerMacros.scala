@@ -1,9 +1,9 @@
-package com.github.wangzaixiang.protobuf.macros
+package com.github.wangzaixiang.protobuf4s.macros
 
 import com.google.protobuf.{CodedInputStream, CodedOutputStream}
 
 import scala.quoted.*
-import com.github.wangzaixiang.protobuf.*
+import com.github.wangzaixiang.protobuf4s.*
 
 import scala.deriving.Mirror
 

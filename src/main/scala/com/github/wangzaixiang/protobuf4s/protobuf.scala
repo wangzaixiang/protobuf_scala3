@@ -1,6 +1,6 @@
-package com.github.wangzaixiang.protobuf
+package com.github.wangzaixiang.protobuf4s
 
-import com.github.wangzaixiang.protobuf.macros.ProtobufSerDerMacros
+import com.github.wangzaixiang.protobuf4s.macros.ProtobufSerDerMacros
 import com.google.protobuf.{CodedInputStream, CodedOutputStream}
 
 import scala.annotation.StaticAnnotation
