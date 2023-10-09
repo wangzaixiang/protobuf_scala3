@@ -172,6 +172,6 @@ class ProtobufSerDerMacros(q: Quotes):
 
     val term = Block(valDefs.values.toList, refs(TypeRepr.of[T]) )
 
-    println("generated code: " + term.show)
+//    println("generated code: " + term.show)
 
     term.asExpr.asInstanceOf[Expr[ProtobufSerDer[T]]]
