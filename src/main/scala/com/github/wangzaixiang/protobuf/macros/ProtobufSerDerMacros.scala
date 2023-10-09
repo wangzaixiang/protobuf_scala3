@@ -5,8 +5,11 @@ import com.google.protobuf.{CodedInputStream, CodedOutputStream}
 import scala.quoted.*
 import com.github.wangzaixiang.protobuf.*
 
-import java.io.ByteArrayOutputStream
-import scala.collection.mutable.ArrayBuffer
+
+trait Generator[T: Type]:
+  def generate(using q: Quotes)(deps: Map[q.reflect.TypeRepr, q.reflect.Term]): Expr[ProtobufSerDer[T]]
+  def sourceTpe(using q: Quotes): q.reflect.TypeRepr = q.reflect.TypeRepr.of[T]
+  def targetTpe(using q: Quotes): q.reflect.TypeRepr = q.reflect.TypeRepr.of[ProtobufSerDer[T]]
 
 object ProtobufSerDerMacros {
 
@@ -120,261 +123,55 @@ object ProtobufSerDerMacros {
       '{ $out.writeString($tag, $v) }
 
   def generateProtobufSerderImpl[T:Type](using Quotes): Expr[ProtobufSerDer[T]] =
-    import quotes.reflect.*
+    new ProtobufSerDerMacros(quotes).genADT[T]
 
-    def genEncode(instance: Expr[T], output: Expr[CodedOutputStream])(using Quotes): Expr[Unit] =
-      import quotes.reflect.*
-      val tpeSym = TypeTree.of[T].symbol
-      val params = tpeSym.primaryConstructor.tree.asInstanceOf[DefDef].paramss.head
-        .params.asInstanceOf[List[ValDef]]
+  private val NO_EXPAND_ADT = new ThreadLocal[Boolean]:
+    override def initialValue(): Boolean = false
+  private val NOT_EXPAND_ADTS = new ThreadLocal[Int]:
+    override def initialValue(): Int = 0
+  private val PRINT_MACRO_CODE: Boolean = java.lang.Boolean.getBoolean("protobuf.printMacroCode")
 
-      val terms = tpeSym.caseFields.zip(params).map { (field, param) =>
-        val tagNum: Expr[Int] = param.symbol.annotations.find(_.tpe =:= TypeRepr.of[tag]).get.asInstanceOf[Apply].args.head.asExprOf[Int]
-        genEncodeField(field, tagNum, instance, output)
-      }
-      Block(terms.toList, Literal(UnitConstant())).asExprOf[Unit]
-
-    def genDecode(input: Expr[CodedInputStream])(using Quotes): Expr[T] =
-      import quotes.reflect.*
-      val tpeSym = TypeTree.of[T].symbol
-      val params = tpeSym.primaryConstructor.tree.asInstanceOf[DefDef].paramss.head
-        .params.asInstanceOf[List[ValDef]]
-
-      val fDoneSym = Symbol.newVal(Symbol.spliceOwner, "done", TypeRepr.of[Boolean], Flags.Mutable, Symbol.noSymbol)
-      val fDoneValDef = ValDef(fDoneSym, Some(Literal(BooleanConstant(false))))
-
-      val fTagSym = Symbol.newVal(Symbol.spliceOwner, "tag", TypeRepr.of[Int], Flags.Mutable, Symbol.noSymbol)
-      val fTagValDef = ValDef(fTagSym, Some(Literal(IntConstant(0))))
-
-      val terms: List[(Symbol, ValDef, Term, List[CaseDef])] = tpeSym.caseFields.zip(params).map { (field, param) =>
-        val tagNum: Expr[Int] = param.symbol.annotations.find(_.tpe =:= TypeRepr.of[tag]).get.asInstanceOf[Apply].args.head.asExprOf[Int]
-        genDecodeField(field, tagNum, input)
-      }
-
-      val valdefs = fDoneValDef :: fTagValDef :: terms.map(_._2)
-      val whileStmt = While( '{ ${Ref(fDoneSym).asExprOf[Boolean]} == false }.asTerm,
-        {
-          val a = Assign( Ref(fTagSym), '{ ${input}.readTag() }.asTerm )
-          val b =
-            val case0 = CaseDef( Literal(IntConstant(0)), None, Assign(Ref(fDoneSym), Literal(BooleanConstant(true))) )
-            Match( Ref(fTagSym), case0 :: terms.flatMap(_._4) )
-          Block( a::b::Nil, Literal(UnitConstant()) )
-        }
-      )
-      val result = Apply( Select.unique(Ref(tpeSym.companionModule), "apply"), terms.map(_._3) )
-
-      val block = Block( valdefs:::whileStmt::Nil, result )
-
-      block.asExprOf[T]
-
-    def genEncodeField(using quotes:Quotes)(field: quotes.reflect.Symbol, tagNum: Expr[Int], instance: Expr[T], output: Expr[CodedOutputStream]): quotes.reflect.Term =
-      import quotes.reflect.*
-      val fieldTpe = field.tree.asInstanceOf[ValDef].tpt.tpe
-
-      genEncodePrimitiveField(field, tagNum, instance, output)
-        .orElse( genEncodeSeqPrimitiveField(field,tagNum, instance, output) )
-        .getOrElse:
-          if fieldTpe <:< TypeRepr.of[Seq[T]] then
-            genEncodeFieldSeqStruct(field, tagNum, instance, output)
-          else
-            report.error(s"genEncodeField: unsupported field:${field.name} type: ${fieldTpe.show} for ${TypeTree.of[T].symbol}")
-            '{
-              ???
-            }.asTerm
-
-    def genEncodePrimitiveField(using quotes: Quotes)(field: quotes.reflect.Symbol, tagNum: Expr[Int], instance: Expr[T], output: Expr[CodedOutputStream]): Option[quotes.reflect.Term] =
-      import quotes.reflect.*
-
-      field.tree.asInstanceOf[ValDef].tpt.tpe.asType match
-        case '[ft] =>
-          genEncodePrimitiveField0[ft](field, tagNum, instance, output)
-
-    def genEncodePrimitiveField0[ft: Type](using quotes: Quotes)(field: quotes.reflect.Symbol, tagNum: Expr[Int], instance: Expr[T], output: Expr[CodedOutputStream]): Option[quotes.reflect.Term] =
-      import quotes.reflect.*
-
-      PrimitiveDataType.of(TypeRepr.of[ft]) match
-        case Some(primitive) =>
-          val dataType = primitive.asInstanceOf[PrimitiveDataType[ft]]
-
-          val value = Select.unique(instance.asTerm, field.name).asExprOf[ft]
-          val expr ='{
-            if( ! ${dataType.isDefaultExpr(value)} ) ${dataType.writeExpr(output, tagNum, value)}
-          }
-          Some(expr.asTerm)
-        case None => None
-
-    def genEncodeSeqPrimitiveField(using quotes:Quotes)(field: quotes.reflect.Symbol, tagNum: Expr[Int], instance: Expr[T], output: Expr[CodedOutputStream]): Option[quotes.reflect.Term] =
-      import quotes.reflect.*
-
-      val tpe = field.tree.asInstanceOf[ValDef].tpt.tpe
-      tpe match
-        case AppliedType(base, args) =>
-          args(0).asType match
-            case '[ft] =>
-              genEncodeSeqPrimitiveField0[ft](field, tagNum, instance, output)
-        case _ => None
-
-    def genEncodeSeqPrimitiveField0[ft: Type](using quotes:Quotes)(field: quotes.reflect.Symbol, tagNum: Expr[Int], instance: Expr[T], output: Expr[CodedOutputStream]): Option[quotes.reflect.Term] =
-      import quotes.reflect.*
-
-      val dataType: PrimitiveDataType[ft] = PrimitiveDataType.of(TypeRepr.of[ft]).get.asInstanceOf[PrimitiveDataType[ft]]
-      def computePacked(): Boolean = dataType.supportPacked
-      def writeNoTag(out: Expr[CodedOutputStream], v: Expr[ft]): Expr[Unit] = dataType.writeNoTagExpr(out, v)
-      def write(v: Expr[ft]): Expr[Unit] = dataType.writeExpr(output, tagNum, v)
-
-      val value = Select.unique(instance.asTerm, field.name).asExprOf[Seq[ft]]
-      val packed = computePacked()
-      if packed then
-        Some('{
-          if ${value}.nonEmpty then
-            val buffer = new ByteArrayOutputStream(32)
-            val out2 = CodedOutputStream.newInstance(buffer)
-            ${value}.foreach :v =>
-              ${ writeNoTag('{out2}, '{v}) }
-            out2.flush()
-
-            ${output}.writeUInt32NoTag( (${tagNum} << 3) | 0x02 )
-            ${output}.writeUInt32NoTag(buffer.size)
-            ${output}.writeRawBytes(buffer.toByteArray())
-        }.asTerm)
-      else
-        Some('{
-          ${value}.foreach :v =>
-            ${write('{v})}
-        }.asTerm)
-
-    def genEncodeFieldSeqStruct(using quotes: Quotes)(field: quotes.reflect.Symbol, tagNum: Expr[Int], instance: Expr[T], output: Expr[CodedOutputStream]): quotes.reflect.Term =
-      import quotes.reflect.*
-      val value = Select.unique(instance.asTerm, field.name).asExprOf[Seq[T]]
-      val self = This(Symbol.spliceOwner.owner).asExprOf[ProtobufSerDer[T]]
-
-      '{
-        ${value}.foreach :item =>
-          val buffer = new ByteArrayOutputStream(32)
-          val out2 = CodedOutputStream.newInstance(buffer)
-          ${self}.encode(item, out2)
-          out2.flush()
-
-          ${output}.writeUInt32NoTag((${tagNum} << 3) | 0x02)
-          ${output}.writeInt32NoTag(buffer.size())
-          ${output}.writeRawBytes(buffer.toByteArray())
-      }.asTerm
-
-    def genDecodeField(using quotes: Quotes)(field: quotes.reflect.Symbol, tagNum: Expr[Int], input: Expr[CodedInputStream]): (quotes.reflect.Symbol, quotes.reflect.ValDef, quotes.reflect.Term, List[quotes.reflect.CaseDef]) =
-      import quotes.reflect.*
-      val name = field.name
-      val tpe = field.tree.asInstanceOf[ValDef].tpt.tpe
-      tpe match
-        case x if x =:= TypeRepr.of[Boolean] => genDecodePrimitiveField(field, tagNum, input)
-        case x if x =:= TypeRepr.of[Int] => genDecodePrimitiveField(field, tagNum, input)
-        case x if x =:= TypeRepr.of[Long] => genDecodePrimitiveField(field, tagNum, input)
-        case x if x =:= TypeRepr.of[Float] => genDecodePrimitiveField(field, tagNum, input)
-        case x if x =:= TypeRepr.of[Double] => genDecodePrimitiveField(field, tagNum, input)
-        case x if x =:= TypeRepr.of[String] => genDecodePrimitiveField(field, tagNum, input)
-
-        case x if x <:< TypeRepr.of[Seq[Boolean]] => genDecodeFieldSeq(field, tagNum, input)
-        case x if x <:< TypeRepr.of[Seq[Int]] => genDecodeFieldSeq(field, tagNum, input)
-        case x if x <:< TypeRepr.of[Seq[Long]] => genDecodeFieldSeq(field, tagNum, input)
-        case x if x <:< TypeRepr.of[Seq[Float]] => genDecodeFieldSeq(field, tagNum, input)
-        case x if x <:< TypeRepr.of[Seq[Double]] => genDecodeFieldSeq(field, tagNum, input)
-        case x if x <:< TypeRepr.of[Seq[String]] => genDecodeFieldSeq(field, tagNum, input)
-
-        case x if tpe <:< TypeRepr.of[Seq[T]] =>
-          genDecodeFieldSeqStruct(field, tagNum, input)
-        case _ =>
-          report.error(s"genDecodeField: unsupported field:${field.name} type: ${tpe.show} for ${TypeTree.of[T].symbol}")
-          ???
-
-    def genDecodePrimitiveField(using quotes:Quotes)(field: quotes.reflect.Symbol, tagNum: Expr[Int], input: Expr[CodedInputStream]): (quotes.reflect.Symbol, quotes.reflect.ValDef, quotes.reflect.Term, List[quotes.reflect.CaseDef]) =
-      import quotes.reflect.*
-
-      def defaultValue(dataType: PrimitiveDataType[_]): Term = dataType.defaultExpr.asTerm
-      def readValue(dataType: PrimitiveDataType[_]): Term = dataType.readExpr(input).asTerm
-
-      val name = field.name
-      val tpe = field.tree.asInstanceOf[ValDef].tpt.tpe
-      val dataType = PrimitiveDataType.of(tpe).get
-      val symbol = Symbol.newVal(Symbol.spliceOwner, "f_" + name, tpe, Flags.Mutable, Symbol.noSymbol)
-      val valdef = ValDef(symbol, Some( defaultValue(dataType) ))
-      val term = Ref(symbol)
-      val caseDef =
-        val num = Expr.unapply(tagNum).get
-        val num1 = (num << 3) | dataType.wireType
-        val assign = Assign(Ref(symbol), readValue(dataType))
-        CaseDef(Literal(IntConstant(num1)), None, assign)
-      (symbol, valdef, term, caseDef :: Nil)
-
-    def genDecodeFieldSeq(using quotes: Quotes)(field: quotes.reflect.Symbol, tagNum: Expr[Int], input: Expr[CodedInputStream]): (quotes.reflect.Symbol, quotes.reflect.ValDef, quotes.reflect.Term, List[quotes.reflect.CaseDef]) =
-      import quotes.reflect.*
-
-      val seqSymbol = Symbol.requiredClass("scala.collection.immutable.Seq")
-
-      field.tree.asInstanceOf[ValDef].tpt.tpe match
-        case AppliedType(base, args) if base =:= seqSymbol.typeRef =>
-          args(0).asType match
-            case '[ft] =>
-              genDecodeFieldSeq0[ft](field, tagNum, input)
-
-
-    def genDecodeFieldSeq0[ft: Type](using quotes:Quotes)(field: quotes.reflect.Symbol, tagNum: Expr[Int], input: Expr[CodedInputStream]): (quotes.reflect.Symbol, quotes.reflect.ValDef, quotes.reflect.Term, List[quotes.reflect.CaseDef]) =
-      import quotes.reflect.*
-
-      def read(): Expr[ft] = PrimitiveDataType.of(TypeRepr.of[ft]).get.readExpr(input).asInstanceOf[Expr[ft]]
-
-      val name = field.name
-      val symbol = Symbol.newVal(Symbol.spliceOwner, "f_" + name, TypeRepr.of[ArrayBuffer[ft]], Flags.Mutable, Symbol.noSymbol)
-      val valdef = ValDef(symbol, Some('{ ArrayBuffer[ft]() }.asTerm))
-      val term = '{ ${ Ref(symbol).asExprOf[ArrayBuffer[ft]] }.toSeq }.asTerm
-      val num = Expr.unapply(tagNum).get
-      val num1 = num << 3   // for unpacked
-      val num2 = num1 | 0x02 // for packed primitive or String
-      val caseDef1: List[CaseDef] =
-        val tagType = if TypeRepr.of[ft] =:= TypeRepr.of[String] then num1 | 0x02 else num1
-        CaseDef(Literal(IntConstant(tagType)), None, '{ ${Ref(symbol).asExprOf[ArrayBuffer[ft]]}.append( ${read()} ) }.asTerm) :: Nil
-
-      val caseDef2: List[CaseDef] = if !(TypeRepr.of[ft] =:= TypeRepr.of[String]) then
-        val code = '{
-          val length = ${ input }.readRawVarint32()
-          val oldLimit = ${ input }.pushLimit(length)
-          while ${ input }.getBytesUntilLimit() > 0 do
-            ${ Ref(symbol).asExprOf[ArrayBuffer[ft]] }.append( ${read()} )
-          ${ input }.popLimit(oldLimit)
-        }.asTerm
-        CaseDef(Literal(IntConstant(num2)), None, code) :: Nil
-      else Nil
-
-      (symbol, valdef, term, caseDef1 ++ caseDef2)
-
-    def genDecodeFieldSeqStruct(using quotes: Quotes)(field: quotes.reflect.Symbol, tagNum: Expr[Int], input: Expr[CodedInputStream]): (quotes.reflect.Symbol, quotes.reflect.ValDef, quotes.reflect.Term, List[quotes.reflect.CaseDef]) =
-      import quotes.reflect.*
-      val name = field.name
-      val symbol = Symbol.newVal(Symbol.spliceOwner, "f_" + name, TypeRepr.of[ArrayBuffer[T]], Flags.Mutable, Symbol.noSymbol)
-      val valdef = ValDef(symbol, Some('{ ArrayBuffer[T]() }.asTerm))
-      val term = '{ ${Ref(symbol).asExprOf[ArrayBuffer[T]]}.toSeq }.asTerm
-      val num = Expr.unapply(tagNum).get
-      val num1 = num << 3 | 0x02
-      val self: Expr[ProtobufSerDer[T]] = This(Symbol.spliceOwner.owner).asExprOf[ProtobufSerDer[T]]
-      val caseDef1 =
-        val code = '{
-          val len = ${input}.readInt32()
-          val oldLimit = ${input}.pushLimit(len)
-          val item = ${self}.decode(${input})
-          ${Ref(symbol).asExprOf[ArrayBuffer[T]]}.append(item)
-          ${input}.popLimit(oldLimit)
-        }.asTerm
-        CaseDef( Literal(IntConstant(num1)), None, code )
-      (symbol, valdef, term, caseDef1::Nil)
-
-
-    val result = '{
-      new ProtobufSerDer[T] {
-        def encode(instance: T, output: CodedOutputStream): Unit = ${ genEncode('{instance}, '{output}) }
-        def decode(input: CodedInputStream): T = ${genDecode('{input}) }
-      }
-    }
-
-//    println("result = " + result.show)
-
-    result
 
 }
+
+class ProtobufSerDerMacros(q: Quotes):
+  import ProtobufSerDerMacros.*
+
+  private def genADT[T: Type](using Quotes): Expr[ProtobufSerDer[T]] =
+    import quotes.reflect.*
+
+    if ProtobufSerDerMacros.NO_EXPAND_ADT.get() then
+      ProtobufSerDerMacros.NOT_EXPAND_ADTS.set(ProtobufSerDerMacros.NOT_EXPAND_ADTS.get() + 1)
+      '{ ??? }
+    else
+      val types: GeneratorMap = Map(q.reflect.TypeRepr.of[T] -> new ProductGenerator[T])
+
+      genMultiBlock[T](types)
+
+  private type GeneratorMap = Map[q.reflect.TypeRepr, Generator[_]]
+
+  private def genMultiBlock[T: Type](types: GeneratorMap)(using Quotes): Expr[ProtobufSerDer[T]] =
+    import quotes.reflect.*
+    var seq = 0
+    val valSyms: Map[TypeRepr, Symbol] = types.map: (tpe, generator) =>
+      seq += 1
+      val sym = Symbol.newVal(Symbol.spliceOwner, s"_$seq", generator.targetTpe, Flags.Lazy, Symbol.noSymbol)
+      (tpe.asInstanceOf[TypeRepr], sym)
+
+    val refs: Map[TypeRepr, Ref] = valSyms.map: (tpe, sym) =>
+      (tpe, Ref(sym))
+
+    val valDefs: Map[TypeRepr, ValDef] = types.map: (tpe, generator) =>
+      val sym: Symbol = valSyms(tpe.asInstanceOf[TypeRepr])
+
+      val nested = sym.asQuotes
+      val refs2 = refs.asInstanceOf[Map[nested.reflect.TypeRepr, nested.reflect.Ref]]
+      val deriveTerm: Term = generator.generate(using nested)(deps = refs2).asTerm
+      val valDef = ValDef(sym, Some(deriveTerm))
+      (tpe.asInstanceOf[TypeRepr], valDef)
+
+    val term = Block(valDefs.values.toList, refs(TypeRepr.of[T]) )
+
+    println("generated code: " + term.show)
+
+    term.asExpr.asInstanceOf[Expr[ProtobufSerDer[T]]]

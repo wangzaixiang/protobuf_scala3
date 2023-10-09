@@ -58,13 +58,26 @@ class MacroTest extends AnyFunSuite {
     MacroTest.check(bean)
   }
 
-  test("complex types") {
+  test("simple reference") {
 
     case class Bean1
     (
       @tag(1) bool: Boolean,
-      @tag(2) bean2: Bean2
-    ) // derives ProtobufSerDer // TODO the code can't passed compile
+      @tag(2) bean1: Bean1
+    ) derives ProtobufSerDer // TODO the code can't passed compile
+
+    val bean1 = Bean1(true, null)
+    MacroTest.check(bean1)
+  }
+
+  test("simple reference 2") {
+
+    case class Bean1
+    (
+      @tag(1) bool: Boolean,
+      @tag(2) bean1: Bean1,
+      @tag(3) bean2: Bean2
+    )derives ProtobufSerDer // TODO the code can't passed compile
 
     case class Bean2
     (
@@ -72,9 +85,8 @@ class MacroTest extends AnyFunSuite {
       @tag(2) str: String
     ) derives ProtobufSerDer
 
-    val bean2 = Bean2(1, "hello")
-    val bean1 = Bean1(true, bean2)
-    // MacroTest.check(bean1)
+    val bean1 = Bean1(true, null, Bean2(10, "Hello"))
+    MacroTest.check(bean1)
   }
 
 }
