@@ -13,6 +13,8 @@ trait ProtobufSerDer[T]:
 
 object ProtobufSerDer:
   inline def derived[T]: ProtobufSerDer[T] = ${ ProtobufSerDerMacros.generateProtobufSerderImpl[T] }
+  inline given serder[T](using deriving.Mirror.Of[T]): ProtobufSerDer[T] = ${ ProtobufSerDerMacros.generateProtobufSerderImpl[T] }
+
 
 extension [T : ProtobufSerDer](instance: T)
   def toBytes: Array[Byte] =

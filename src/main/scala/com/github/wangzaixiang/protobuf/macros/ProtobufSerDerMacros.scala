@@ -5,6 +5,8 @@ import com.google.protobuf.{CodedInputStream, CodedOutputStream}
 import scala.quoted.*
 import com.github.wangzaixiang.protobuf.*
 
+import scala.deriving.Mirror
+
 
 trait Generator[T: Type]:
   def generate(using q: Quotes)(deps: Map[q.reflect.TypeRepr, q.reflect.Term]): Expr[ProtobufSerDer[T]]
@@ -144,11 +146,76 @@ class ProtobufSerDerMacros(q: Quotes):
       ProtobufSerDerMacros.NOT_EXPAND_ADTS.set(ProtobufSerDerMacros.NOT_EXPAND_ADTS.get() + 1)
       '{ ??? }
     else
-      val types: GeneratorMap = Map(q.reflect.TypeRepr.of[T] -> new ProductGenerator[T])
+//      val types: GeneratorMap = Map(q.reflect.TypeRepr.of[T] -> new ProductGenerator[T])  // TODO
+      val types: GeneratorMap = buildGeneratorMap[T]
 
       genMultiBlock[T](types)
 
   private type GeneratorMap = Map[q.reflect.TypeRepr, Generator[_]]
+
+  private def buildGeneratorMap[T: Type](using Quotes): GeneratorMap =
+    try
+      ProtobufSerDerMacros.NO_EXPAND_ADT.set(true)
+      Expr.summon[Mirror.Of[T]] match
+        case Some('{ $m: Mirror.ProductOf[T] }) =>
+          visit[T](Map.empty)
+        case _ =>
+          throw new IllegalArgumentException(s"Type ${Type.show[T]} is not a product type")
+    finally
+      ProtobufSerDerMacros.NO_EXPAND_ADT.set(false)
+
+  private def visit[T:Type](acc: GeneratorMap): GeneratorMap =
+    given Quotes = q
+    import q.reflect.*
+
+    def visitInside[S: Type](acc: GeneratorMap): GeneratorMap =
+      TypeRepr.of[S] match
+        case tpe if PrimitiveDataType.of(using q)(TypeRepr.of[S]).isDefined => acc
+        case tpe if tpe <:< TypeRepr.of[List[_]] => visitAppliedType1[S](acc)
+        case tpe if tpe <:< TypeRepr.of[Seq[_]] => visitAppliedType1[S](acc)
+        case tpe if tpe <:< TypeRepr.of[Vector[_]] => visitAppliedType1[S](acc)
+        case tpe if tpe <:< TypeRepr.of[Array[_]] => visitAppliedType1[S](acc)
+        case tpe if tpe <:< TypeRepr.of[Set[_]] => visitAppliedType1[S](acc)
+        case tpe if tpe <:< TypeRepr.of[Option[_]] => visitAppliedType1[S](acc)
+        case _ => visitADT[S](acc)
+
+    def visitAppliedType1[S:Type](acc: GeneratorMap): GeneratorMap =
+      TypeRepr.of[S].asInstanceOf[AppliedType].args.foldLeft(acc):
+        case (acc, arg) => arg.asType match
+          case '[t] => visit[t](acc)
+
+    def visitADT[S:Type](acc: GeneratorMap): GeneratorMap =
+      Expr.summon[Mirror.Of[S]] match
+        case Some('{ $m: Mirror.ProductOf[S] }) => visitProduct[S](acc)
+        case Some('{
+          $m: Mirror.SumOf[S] {
+            type MirroredElemTypes = elemTypes
+            type MirroredElemLabels = elemLabels
+          }
+        }) => throw new NotImplementedError("Sum type not implemented yet")
+        case Some(_) => ???
+        case None =>
+          throw new NotImplementedError("Not a Product or Sum or OrType:" + TypeRepr.of[S].show)
+
+    def visitProduct[S: Type](map: GeneratorMap): GeneratorMap =
+      val generator = ProductGenerator[S]() // (TypeRepr.of[T], GeneratorKind.GenProduct)
+      val acc2 = acc + (TypeRepr.of[S] -> generator)
+
+      TypeTree.of[S].symbol.caseFields.foldLeft(acc2): (acc, field) =>
+        field.tree.asInstanceOf[ValDef].tpt.tpe.asType match
+          case '[t] => visit[t](acc)
+
+    if TypeRepr.of[T] =:= TypeRepr.of[Null] then acc
+    else if acc.isEmpty then visitInside[T](acc)
+    else if acc contains TypeRepr.of[T] then acc
+    else
+      ProtobufSerDerMacros.NOT_EXPAND_ADTS.set(0)
+      val found = Expr.summon[ProtobufSerDer[T]]
+      if ProtobufSerDerMacros.NOT_EXPAND_ADTS.get() > 0 then
+        visitInside[T](acc)
+      else found match
+        case Some(_) => acc
+        case None => visitInside[T](acc)
 
   private def genMultiBlock[T: Type](types: GeneratorMap)(using Quotes): Expr[ProtobufSerDer[T]] =
     import quotes.reflect.*

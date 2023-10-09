@@ -89,14 +89,14 @@ class MacroTest extends AnyFunSuite {
     MacroTest.check(bean1)
   }
 
-  ignore("simple reference 3 not supported now") {
+  test("simple reference 3") {
 
     case class Bean1
     (
       @tag(1) bool: Boolean,
       @tag(2) bean1: Bean1,
       @tag(3) bean2: Bean2
-    ) // derives ProtobufSerDer // TODO the code can't passed compile
+    )
 
     case class Bean2
     (
@@ -105,7 +105,26 @@ class MacroTest extends AnyFunSuite {
     )
 
     val bean1 = Bean1(true, null, Bean2(10, "Hello"))
-//    MacroTest.check(bean1)
+    MacroTest.check(bean1)
+  }
+
+  test("simple reference 4") {
+
+    case class Bean1
+    (
+      @tag(1) bool: Boolean,
+      @tag(2) bean1: Bean1,
+      @tag(3) bean2: Seq[Bean2]
+    )
+
+    case class Bean2
+    (
+      @tag(1) i32: Int,
+      @tag(2) str: String
+    )
+
+    val bean1 = Bean1(true, null, Bean2(10, "Hello") :: Nil)
+    MacroTest.check(bean1)
   }
 
 }
