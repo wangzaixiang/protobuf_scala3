@@ -26,3 +26,14 @@ protobuf 官方提供了 Java 绑定， 处于对 protobuf-java 实现中生成�
 ```
 
 清爽的世界，无比美好（除了 @tag 还是有些多余）
+
+## TODO List
+- [ ] datatype
+  - [X] primitive
+  - [X] repeat field
+  - [ ] optional field (with default value)
+  - [ ] enum 
+  - [ ] map
+  - [ ] oneof
+- [ ] protoc plugin to generate clean Scala code for proto file
+- [ ] generate metadata(google.protobuf.descriptor).
